@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+BASH_SOURCE_DIR="$PWD"
+BASH_BUILD_PREFIX='/usr/local/bash'
+BASH_PATCH=
+FETCH_BASH_SOURCES="${0%/*}/fetch-bash-sources"
+
+usage() {
+  local status="${1:-0}"
+  local cmd="${0##*/}"
+  local line
+
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done <<END_OF_USAGE
+Usage: $cmd [-h|--help] [-d|--directory <dir>] [-p|--prefix <dir>]
+       ${cmd//?/ } [--patch <path>] <version>...
+
+Builds and installs the specified Bash versions.
+
+  -h, --help        Print this help message
+  -d, --directory   Directory into which to store sources, created if needed
+                      (defaults to \$PWD)
+  -p, --prefix      Installation directory prefix for Bash builds; versions will
+                      be built in subdirectories of the prefix, i.e.
+                      <prefix>/<version> (defaults to $BASH_BUILD_PREFIX)
+  --patch <path>    An additional patch to apply to the target Bash version(s).
+                      The patch must apply with \`-p0\` as the standard Bash
+                      patches do. The resulting build will reside in
+                      <prefix>/<version>-<patch>, where <patch> is the file name
+                      of the patch without the file extension.
+  <version>...      Versions of Bash to build in <major>.<minor>.<patchlevel>
+                      format
+
+Once your build is complete, you can test it by running commands with a custom
+PATH variable assignment:
+
+  PATH="<prefix>/<version>/bin:\$PATH" script-to-test <arg>...
+
+END_OF_USAGE
+  exit "$status"
+}
+
+abort() {
+  printf 'Error: %s\n\n' "$*" >&2
+  exit 1
+}
+
+while [[ "$#" -ne 0 ]]; do
+  case "$1" in
+  -d|--directory)
+    shift
+    BASH_SOURCE_DIR="$1"
+    ;;
+  -h|--help)
+    usage
+    ;;
+  -p|--prefix)
+    shift
+    BASH_BUILD_PREFIX="$1"
+    ;;
+  --patch)
+    shift
+    BASH_PATCH="$1"
+    if [[ ! -r "$BASH_PATCH" ]]; then
+      abort "Patch file '$BASH_PATCH' doesn't exist or isn't readable."
+    fi
+    ;;
+  -*)
+    printf 'Error: Unknown option: %s\n\n' "$1" >&2
+    usage 1
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift
+done
+
+BASH_VERSIONS=("$@")
+
+if [[ "${#BASH_VERSIONS[@]}" -eq 0 ]]; then
+  abort 'No Bash versions specified.'
+fi
+
+check_or_create_build_prefix_directory() {
+  if [[ -d "$BASH_BUILD_PREFIX" ]]; then
+    if [[ ! -w "$BASH_BUILD_PREFIX" ]]; then
+      abort "$BASH_BUILD_PREFIX isn't writable."
+    fi
+  elif ! mkdir -p "$BASH_BUILD_PREFIX"; then
+    abort "Failed to create $BASH_BUILD_PREFIX."
+  fi
+}
+
+check_or_create_build_prefix_directory
+
+build_bash_version() {
+  local version="$1"
+  local current_dir="$PWD"
+  local minor_version
+  local patchlevel
+  local patch_name="${BASH_PATCH##*/}"
+  local full_version
+  local full_version_build_dir
+  local full_version_build_prefix
+  local bash_dir
+  local bash_tarball
+
+  if [[ "$version" =~ ([0-9]\.[0-9])(.[0-9]+)? ]]; then
+    minor_version="${BASH_REMATCH[1]}"
+    patchlevel="${BASH_REMATCH[2]/.}"
+  fi
+
+  patch_name="${patch_name%.*}"
+  full_version="${version}${patch_name:+-$patch_name}"
+  full_version_build_prefix="$BASH_BUILD_PREFIX/$full_version"
+  printf 'Building Bash %s...\n' "$full_version"
+
+  bash_dir="$BASH_SOURCE_DIR/bash-$minor_version"
+  bash_tarball="bash-$minor_version.tar.gz"
+
+  if [[ ! -d "$bash_dir" || ! -f "$bash_dir/$bash_tarball" ]] && \
+    ! "$FETCH_BASH_SOURCES" -d "$BASH_SOURCE_DIR" -v "$minor_version"; then
+    abort "Failed fetch sources for Bash $version."
+  elif ! cd "$bash_dir"; then
+    abort "Failed to change into download directory $bash_dir."
+  fi
+  trap "cd '$current_dir'" RETURN
+
+  full_version_build_dir="bash-$full_version"
+
+  if [[ ! -d "$full_version_build_dir" ]] && \
+    ! mkdir -p "$full_version_build_dir"; then
+    abort Failed to create build directory $bash_dir/$full_version_build_dir.
+  elif ! gzip -dc "$bash_tarball" | \
+    tar xf - -C "$full_version_build_dir" --strip-components 1 || \
+    [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
+    abort Failed to extract $bash_tarball into $bash_dir/$full_version_build_dir
+  fi
+
+  cd "$full_version_build_dir" || exit 1
+  apply_bash_patches "$minor_version" "$patchlevel"
+  ./configure --prefix="$full_version_build_prefix" && make && make install
+  if [[ "$?" -ne 0 ]]; then
+    abort "Building Bash $version failed."
+  fi
+
+  printf 'Build of %s complete.\n\n' "$full_version_build_prefix"
+}
+
+apply_bash_patches() {
+  local minor_version="$1"
+  local patchlevel="$2"
+  local patches
+  local patch
+
+  if [[ -z "$patchlevel" ]]; then
+    return
+  fi
+  patches=(../bash${minor_version/.}-[0-9][0-9][0-9])
+  patches=("${patches[@]:0:$patchlevel}")
+
+  if [[ -n "$BASH_PATCH" ]]; then
+    patches+=("$BASH_PATCH")
+  fi
+
+  for patch in "${patches[@]}"; do
+    printf '  Applying patch: %s\n' "$patch"
+    if ! patch -p0 <"$patch"; then
+      abort "Failed to apply $patch"
+    fi
+  done
+}
+
+for version in "${BASH_VERSIONS[@]}"; do
+  build_bash_version "$version"
+done
+
+printf 'Building all Bash versions into %s complete.\n' "$BASH_BUILD_PREFIX"

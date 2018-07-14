@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+BASH_VERSIONS='3.2,4.0,4.1,4.2,4.3,4.4'
+BASH_MIRROR='https://mirrors.ocf.berkeley.edu/gnu/bash'
+BASH_SOURCE_DIR="$PWD"
+
+usage() {
+  local status="${1:-0}"
+  local cmd="${0##*/}"
+  local origIFS="$IFS"
+  local line
+
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done <<END_OF_USAGE
+Usage: $cmd [-h|--help] [-d|--directory <dir>] [-m|--mirror <url>]
+       ${cmd//?/ } [-v|--versions <versions>]
+
+Fetches Bash sources for building and comparing different versions.
+
+  -h, --help        Print this help message
+  -d, --directory   Directory into which to store sources, created if needed
+                      (defaults to \$PWD)
+  -m, --mirror      Specify which source mirror to use
+                      (defaults to $BASH_MIRROR)
+  -v, --versions    Comma-separated versions of Bash to retrieve in
+                      <major>.<minor> format; all patches for each base version
+                      will be retrieved (defaults to $BASH_VERSIONS)
+
+END_OF_USAGE
+  exit "$status"
+}
+
+abort() {
+  printf 'Error: %s\n\n' "$*" >&2
+  exit 1
+}
+
+while [[ "$#" -ne 0 ]]; do
+  case "$1" in
+  -d|--directory)
+    shift
+    BASH_SOURCE_DIR="$1"
+    ;;
+  -h|--help)
+    usage
+    ;;
+  -m|--mirror)
+    shift
+    BASH_MIRROR="$1"
+    ;;
+  -v|--versions)
+    shift
+    BASH_VERSIONS="$1"
+    ;;
+  *)
+    printf 'Error: Unknown option: %s\n\n' "$1" >&2
+    usage 1
+    ;;
+  esac
+  shift
+done
+
+fetch_bash_source() {
+  local version="$1"
+  local current_dir="$PWD"
+  local bash_dir="$BASH_SOURCE_DIR/bash-$version"
+  local bash_tarball="bash-$version.tar.gz"
+  local line
+  local patch_file_pattern="a href=\"(bash${version/.}-[0-9]{3})\""
+  local patch_file
+  local files=()
+
+  printf 'Fetching sources for Bash %s...\n' "$version"
+
+  if [[ ! -d "$bash_dir" ]] && ! mkdir -p "$bash_dir"; then
+    abort "Failed to create download directory $bash_dir."
+  elif ! cd "$bash_dir"; then
+    abort "Failed to change into download directory $bash_dir."
+  fi
+  trap "cd '$current_dir'" RETURN
+
+  if [[ ! -f "$bash_tarball" ]]; then
+    files+=("$bash_tarball")
+  fi
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ $patch_file_pattern ]]; then
+      patch_file="${BASH_REMATCH[1]}"
+      if [[ ! -f "$patch_file" ]]; then
+        files+=("bash-$version-patches/${BASH_REMATCH[1]}")
+      fi
+    fi
+  done < <(curl -s "$BASH_MIRROR/bash-$version-patches/")
+
+  printf '  %s\n' "${files[@]}"
+
+  if [[ "${#files[@]}" -ne 0 ]] && ! curl -LO --remote-name-all \
+      "${files[@]/#/$BASH_MIRROR/}"; then
+    abort "Failed to fetch sources for Bash $version from $BASH_MIRROR."
+  fi
+  printf 'Fetching Bash %s sources complete.\n\n' "$version"
+}
+
+origIFS="$IFS" IFS=, BASH_VERSIONS=($BASH_VERSIONS) IFS="$origIFS"
+
+for version in "${BASH_VERSIONS[@]}"; do
+  fetch_bash_source "$version"
+done
+
+printf 'Fetching all Bash sources into %s complete.\n' "$BASH_SOURCE_DIR"
